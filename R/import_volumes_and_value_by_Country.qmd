@@ -1,0 +1,607 @@
+---
+title: "Trade Statistics: Import Volumes and Values by Country"
+format:
+  html:
+    toc: true
+    toc-title: TOC
+    toc-expand: true
+    toc_float: true
+    toc-depth: 6
+    number-sections: true
+    theme: lumen
+    code-fold: false
+lang: en
+---
+
+# Data
+
+::: {.callout-note collapse="false" icon="true"}
+## 財務省貿易統計 - 普通貿易統計（CSV形式の統計表）
+
+[https://www.customs.go.jp/toukei/info/tsdl.htm](https://www.customs.go.jp/toukei/info/tsdl.htm){target="_blank"}
+:::
+
+::: {.callout-note collapse="false" icon="true"}
+## 普通貿易統計
+貿易統計_全国分 / 品別国別表 / 輸入
+
+[https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&toukei=00350300&tstat=000001013141&cycle=1&tclass1=000001013180&tclass2=000001013182&cycle_facet=cycle&tclass3val=0&metadata=1&data=1](https://www.e-stat.go.jp/stat-search/files?page=1&layout=datalist&toukei=00350300&tstat=000001013141&cycle=1&tclass1=000001013180&tclass2=000001013182&cycle_facet=cycle&tclass3val=0&metadata=1&data=1){target="_blank"}
+:::
+
+```{r}
+#| message: false
+library(estatapi)
+library(dplyr)
+library(readr)
+library(arrow)
+library(DT)
+library(ggplot2)
+library(scales)
+library(gghighlight)
+library(ggthemes)
+library(ggsci)
+library(ggrepel)
+library(ggtext)
+library(gt)
+library(maps)
+
+outdir <- "../data/trade"
+figdir <- "../fig"
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+dir.create(figdir, showWarnings = FALSE)
+
+appId <- keyring::key_get("e-stat")
+```
+
+## 1988--2024
+
+```{r}
+#| eval: true
+#| message: false
+get_stats_data <- function(statsDataId, cdCat01) {
+  estat_getStatsData(
+    appId = appId,
+    statsDataId = statsDataId,
+    cdCat01 = cdCat01
+  )
+}
+
+df_list <- list(
+  get_stats_data("0003258346", "081090010"), # 1988-1990
+  get_stats_data("0003258347", "081090010"), # 1991-1995
+  get_stats_data("0003258348", "081050000"), # 1996-2000
+  get_stats_data("0003228183", "081050000"), # 2001-2005
+  get_stats_data("0003228184", "081050000"), # 2006-2010
+  get_stats_data("0003228185", "081050000"), # 2011-2015
+  get_stats_data("0003313966", "081050000"), # 2016-2020
+  get_stats_data("0003425294", "081050000")  # 2021-2024
+)
+
+df <- do.call(rbind, df_list)
+
+write.table(df, file = file.path(outdir, "import_volumes_and_value_by_country.csv"), sep = ",", row.names = FALSE)
+write_parquet(df, sink = file.path(outdir, "import_volumes_and_value_by_country.parquet"))
+```
+
+## Read the Data
+
+```{r}
+#| eval: false
+# df <- read.csv(file.path(outdir, "import_volumes_and_value_by_country.csv"), header = TRUE, check.names = FALSE)
+df <- read_parquet(file.path(outdir, "import_volumes_and_value_by_country.parquet"))
+```
+```{r}
+#| eval: true
+# all <- read.csv(file.path(outdir, "import_volumes_and_value_all.csv"), header = TRUE)
+all <- read_parquet(file.path(outdir, "import_volumes_and_value_all.parquet"))
+```
+
+
+# Tables
+
+```{r}
+DT::datatable(
+  df, rownames = FALSE, filter = 'top',
+  extensions = 'Buttons',
+  options = list(
+    pageLength = 10,
+    dom = 'Blfrtip',
+    buttons = list(
+      c('csv', 'excel'),
+      I('colvis')
+    )
+  )
+) |>
+  DT::formatCurrency(grepl("value", names(df)), currency = "", interval = 3, mark = ",", digits = 0)
+```
+
+
+# Figures
+
+## Import Volume
+
+```{r}
+#| warning: false
+#| dpi: 600
+# table(df$国)
+country_map <- tibble::tibble(
+  original = c("アメリカ合衆国", "ニュージーランド", "チリ", "大韓民国", 
+               "中華人民共和国", "イラン", "カナダ", "ジョージア"),
+  english = c("United States", "New Zealand", "Chile", "South Korea", 
+              "China", "Iran", "Canada", "Georgia"),
+  latitude = c(37.1, -40.9, -35.7, 37.5, 35.9, 32.4, 56.1, 42.3) # 代表的な緯度
+)
+
+df_volume <- df |>
+  filter(`統計品目表の数量・金額` == "合計_数量2") |>
+  mutate(
+    year = as.integer(gsub("年", "", `時間軸(年次)`)),
+    ton = value / 1000,
+    国 = sub("^\\d+_", "", 国)
+  ) |>
+  left_join(country_map, by = c("国" = "original")) |>
+  mutate(
+    country = coalesce(english, 国),
+    hemisphere = factor(
+      case_when(
+        !is.na(latitude) & latitude > 0 ~ "Northern Hemisphere",
+        !is.na(latitude) & latitude < 0 ~ "Southern Hemisphere",
+        TRUE ~ NA_character_
+      ),
+      levels = c("Northern Hemisphere", "Southern Hemisphere")
+    )
+  ) |>
+  select(-english, -latitude)
+
+country_order <- df_volume |>
+  summarise(total_value = sum(value, na.rm = TRUE), .by = country) |>
+  arrange(total_value) |>
+  pull(country)
+
+df_volume <- df_volume |>
+  mutate(
+    country = factor(country, levels = country_order)
+  ) |>
+  filter(year < 2025)
+
+country_list <- c("New Zealand", "Chile", "Australia",
+                  "United States", "South Korea", "China",
+                  "Georgia", "Iran", "Canada")
+color_palette <- setNames(pal_uchicago()(length(country_list)), country_list)
+
+p <- ggplot(df_volume, aes(x = year, y = ton, fill = country)) +
+  geom_col(position = "stack") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Import Volumes by Year and Country",
+    x = "Year",
+    y = "Import Volume (t)",
+    fill = "Country",
+    caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  scale_fill_uchicago() +
+  theme(
+    plot.caption = element_markdown()
+  )
+
+ggsave("import_volumes_by_year_and_country.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+```{r}
+#| warning: false
+#| dpi: 600
+p <- ggplot(df_volume, aes(x = year, y = ton, fill = country)) +
+  geom_col(position = "stack") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+#   title = "Import Volumes by Year and Country",
+    x = "Year",
+    y = "Import Volume (t)",
+    fill = "Country",
+#   caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  facet_wrap(~ country, scales = "free_y") +
+# scale_fill_uchicago() +
+  scale_fill_manual(values = color_palette, drop = TRUE) +
+  theme(
+    legend.position = "none",
+    panel.border = element_blank(),
+    axis.line.x = element_line(linewidth = .25),
+    axis.line.y = element_line(linewidth = .25),
+    strip.background = element_rect(fill = NA, color = NA),
+    strip.text = element_text(face = "bold"),
+    text = element_text(family = "Helvetica")
+  )
+
+ggsave("figure1.pdf", plot = p, path = figdir, width = 8, height = 6)
+ggsave("figure1.png", plot = p, path = figdir, width = 8, height = 6, dpi = 600)
+p
+```
+```{r}
+#| warning: false
+#| dpi: 600
+p <- ggplot(df_volume, aes(x = year, y = ton, color = country, group = country)) +
+  geom_line() +
+  scale_y_continuous(labels = label_comma()) +
+  labs(
+    title = "Import Volumes by Year and Hemisphere",
+    x = "Year",
+    y = "Import Volume (t)",
+    color = "Country",
+    caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  scale_color_uchicago() +
+  theme(
+    plot.caption = element_markdown()
+  ) +
+  facet_wrap(~ hemisphere, scales = "free_y", ncol = 1)
+# gghighlight()
+
+ggsave("import_volumes_by_year_and_country_hemisphere.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+
+### Map
+
+#### 2024
+
+```{r}
+#| warning: false
+#| dpi: 600
+df_volume_2024 <- df_volume |>
+  filter(year == 2024) |>
+  bind_rows(
+    data.frame(
+      country = "Others",
+      value = all[all$year == 2024, "quantity2"] / 1000 - sum(df_volume$ton[df_volume$year == 2024])
+    )
+  ) |>
+  mutate(
+    country = factor(country, levels = c(country_order, "Others")),
+    percentage = round(value / sum(value) * 100, 2)
+  )
+
+gt(df_volume_2024)
+
+map_volume_2024 <- map_data("world") |>
+  left_join(
+    df_volume_2024 |>
+      mutate(
+        country = case_when(
+          country == "United States" ~ "USA",
+          TRUE ~ country
+        )
+      ),
+    by = c("region" = "country")
+  )
+
+p <- ggplot(map_volume_2024, aes(x = long, y = lat, group = group, fill = region)) +
+  geom_polygon() +
+  gghighlight(ton > 0) +
+  labs(title = "Import Volumes by Country (2024)", fill = "Volume (ton)") +
+  theme_void() +
+  scale_fill_nejm() +
+  theme(
+    legend.position = "none",
+    text = element_text(family = "Helvetica")
+  )
+
+ggsave("import_volumes_by_year_and_country_map_2024.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+
+#### 2015
+
+```{r}
+#| warning: false
+#| dpi: 600
+df_volume_2015 <- df_volume |>
+  filter(year == 2015) |>
+  bind_rows(
+    data.frame(
+      country = "Others",
+      value = all[all$year == 2015, "quantity2"] / 1000 - sum(df_volume$ton[df_volume$year == 2015])
+    )
+  ) |>
+  mutate(
+    country = factor(country, levels = c(country_order, "Others")),
+    percentage = round(value / sum(value) * 100, 2)
+  )
+
+gt(df_volume_2015)
+
+map_volume_2015 <- map_data("world") |>
+  left_join(
+    df_volume_2015 |>
+      mutate(
+        country = case_when(
+          country == "United States" ~ "USA",
+          TRUE ~ country
+        )
+      ),
+    by = c("region" = "country")
+  )
+
+p <- ggplot(map_volume_2015, aes(x = long, y = lat, group = group, fill = region)) +
+  geom_polygon() +
+  gghighlight(ton > 0) +
+  labs(title = "Import Volumes by Country (2015)", fill = "Volume (ton)") +
+  theme_void() +
+  scale_fill_nejm() +
+  theme(
+    legend.position = "none",
+    text = element_text(family = "Helvetica")
+  )
+
+ggsave("import_volumes_by_year_and_country_map_2015.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+
+#### 2005
+
+```{r}
+#| warning: false
+#| dpi: 600
+df_volume_2005 <- df_volume |>
+  filter(year == 2005) |>
+  bind_rows(
+    data.frame(
+      country = "Others",
+      value = all[all$year == 2005, "quantity2"] / 1000 - sum(df_volume$ton[df_volume$year == 2005])
+    )
+  ) |>
+  mutate(
+    country = factor(country, levels = c(country_order, "Others")),
+    percentage = round(value / sum(value) * 100, 2)
+  )
+
+gt(df_volume_2005)
+
+map_volume_2005 <- map_data("world") |>
+  left_join(
+    df_volume_2005 |>
+      mutate(
+        country = case_when(
+          country == "United States" ~ "USA",
+          TRUE ~ country
+        )
+      ),
+    by = c("region" = "country")
+  )
+
+p <- ggplot(map_volume_2005, aes(x = long, y = lat, group = group, fill = region)) +
+  geom_polygon() +
+  gghighlight(ton > 0) +
+  labs(title = "Import Volumes by Country (2005)", fill = "Volume (ton)") +
+  theme_void() +
+  scale_fill_nejm() +
+  theme(
+    legend.position = "none",
+    text = element_text(family = "Helvetica")
+  )
+
+ggsave("import_volumes_by_year_and_country_map_2005.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+
+### Monthly
+
+```{r}
+#| dpi: 600
+df_monthly <- df |>
+  filter(
+    grepl("数量2$", `統計品目表の数量・金額`),
+    !grepl("合計", `統計品目表の数量・金額`)
+  ) |>
+  mutate(
+    year = parse_number(`時間軸(年次)`),
+    month = as.integer(sub("月_数量2", "", `統計品目表の数量・金額`)),
+    ton = value / 1000,
+    国 = sub("^\\d+_", "", 国)
+  ) |>
+  left_join(country_map, by = c("国" = "original")) |>
+  mutate(
+    country = coalesce(english, 国),
+    hemisphere = factor(
+      case_when(
+        !is.na(latitude) & latitude > 0 ~ "Northern Hemisphere",
+        !is.na(latitude) & latitude < 0 ~ "Southern Hemisphere",
+        TRUE ~ NA_character_
+      ),
+      levels = c("Northern Hemisphere", "Southern Hemisphere")
+    )
+  ) |>
+  select(-english, -latitude)
+
+df_monthly <- df_monthly |>
+  mutate(
+    country = factor(country, levels = country_order)
+  )
+
+p <- ggplot(df_monthly, aes(x = month, y = ton, group = interaction(year, country), color = country)) +
+  geom_line(alpha = 0.3, linewidth = 0.5) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Monthly Import Volumes by Hemisphere and Country (1988-2024)",
+    x = "Month",
+    y = "Import Volume (t)",
+    color = "Country",
+    caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  scale_color_uchicago() +
+  facet_wrap(~ hemisphere, scales = "free_y", ncol = 1) +
+  theme(
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "right",
+    plot.caption = element_markdown()
+  )
+
+ggsave("monthly_import_volumes_by_hemisphere.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+
+label_data <- df_monthly |>
+  filter(ton == max(ton), .by = country)
+
+p <- ggplot(df_monthly, aes(x = month, y = ton, group = interaction(year, country), color = country)) +
+  geom_line(alpha = .4, linewidth = 0.5) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  geom_text_repel(data = label_data, aes(label = country),
+                  size = 3,
+                  color = "black",
+                  family = "Helvetica",
+                  segment.color = "black",
+                  point.padding = 1,
+                  # United Sates, Chile, Iran, Canada, China, South Korea, New Zealand, Georgia
+                  nudge_x = c(1.3, -3.5, 1.5, -.5, -.5, 2.8, 2, 3.2),
+                  nudge_y = c(100, 6000, 300, 500, 150, 300, 400, 1000),
+                  segment.curvature = c(.2, 0, 0, 0, 0, 0, .2, .1),
+#                 segment.curvature = 0.2,
+                  segment.ncp = 3) +
+  labs(
+#   title = "Monthly Import Volumes by Hemisphere and Country (1988-2024)",
+    x = "Month",
+    y = "Import Volume (t)",
+    color = "Country",
+#   caption = "Source: Ministry of Finance 'Customs Statistics'"
+  ) +
+  theme_bw() +
+# scale_color_uchicago() +
+  scale_color_manual(values = color_palette, drop = TRUE) +
+  facet_wrap(~ hemisphere, scales = "free_y", ncol = 1) +
+  theme(
+    legend.position = "none",
+    panel.border = element_blank(),
+    axis.line.x = element_line(linewidth = .25),
+    axis.line.y = element_line(linewidth = .25),
+    strip.background = element_rect(fill = NA, color = NA),
+    strip.text = element_text(face = "bold"),
+    text = element_text(family = "Helvetica")
+  )
+
+ggsave("figure2.pdf", plot = p, path = figdir, width = 8, height = 6)
+ggsave("figure2.png", plot = p, path = figdir, width = 8, height = 6, dpi = 600)
+p
+```
+
+
+## Import Value
+
+```{r}
+#| message: false
+#| dpi: 600
+df_value <- df |>
+  filter(`統計品目表の数量・金額` == "合計_金額") |>
+  mutate(
+    year = as.integer(gsub("年", "", `時間軸(年次)`)),
+    ton = value / 1000,
+    国 = sub("^\\d+_", "", 国)
+  ) |>
+  left_join(country_map, by = c("国" = "original")) |>
+  mutate(
+    country = coalesce(english, 国),
+    hemisphere = factor(
+      case_when(
+        !is.na(latitude) & latitude > 0 ~ "Northern Hemisphere",
+        !is.na(latitude) & latitude < 0 ~ "Southern Hemisphere",
+        TRUE ~ NA_character_
+      ),
+      levels = c("Northern Hemisphere", "Southern Hemisphere")
+    )
+  ) |>
+  select(-english, -latitude)
+
+country_order <- df_value |>
+  summarise(total_value = sum(value, na.rm = TRUE), .by = country) |>
+  arrange(total_value) |>
+  pull(country)
+
+df_value <- df_value |>
+  mutate(
+    country = factor(country, levels = country_order)
+  )
+
+p <- ggplot(df_value, aes(x = year, y = value, color = country)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Import Value by Year and Country",
+    x = "Year",
+    y = "Import Value (thousand JPY)",
+    color = "Country",
+    caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  scale_color_lancet() +
+  facet_wrap(~ hemisphere, scales = "free_y", ncol = 1) +
+  theme(
+    plot.caption = element_markdown()
+  )
+# gghighlight()
+
+ggsave("import_value_by_year_and_country.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
+
+
+### Monthly
+
+```{r}
+df_value_monthly <- df |>
+  filter(grepl("金額$", `統計品目表の数量・金額`)) |>
+  filter(!grepl("合計", `統計品目表の数量・金額`)) |>
+  mutate(
+    year = parse_number(`時間軸(年次)`),
+    month = as.integer(sub("月_金額", "", `統計品目表の数量・金額`)),
+    ton = value / 1000,
+    国 = sub("^\\d+_", "", 国)
+  ) |>
+  left_join(country_map, by = c("国" = "original")) |>
+  mutate(
+    country = coalesce(english, 国),
+    hemisphere = factor(
+      case_when(
+        !is.na(latitude) & latitude > 0 ~ "Northern Hemisphere",
+        !is.na(latitude) & latitude < 0 ~ "Southern Hemisphere",
+        TRUE ~ NA_character_
+      ),
+      levels = c("Northern Hemisphere", "Southern Hemisphere")
+    )
+  ) |>
+  select(-english, -latitude)
+
+df_value_monthly <- df_value_monthly |>
+  mutate(
+    country = factor(country, levels = country_order)
+  )
+
+p <- ggplot(df_value_monthly, aes(x = month, y = ton, group = interaction(year, country), color = country)) +
+  geom_line(alpha = 0.3, linewidth = 0.5) +
+  scale_x_continuous(breaks = 1:12, labels = month.abb) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Monthly Import Value by Hemisphere and Country (1988-2024)",
+    x = "Month",
+    y = "Import Value (thousand JPY)",
+    color = "Country",
+    caption = "**Source:** Ministry of Finance, _Trade Statistics_."
+  ) +
+  theme_bw() +
+  scale_color_npg() +
+  facet_wrap(~ hemisphere, scales = "free_y", ncol = 1) +
+  theme(
+    strip.background = element_rect(fill = "gray90"),
+    strip.text = element_text(face = "bold"),
+    legend.position = "right",
+    plot.caption = element_markdown()
+  )
+
+ggsave("monthly_import_value_by_hemisphere.pdf", plot = p, path = figdir, width = 8, height = 6)
+p
+```
