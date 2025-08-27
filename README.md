@@ -2,7 +2,7 @@
 
 This repository contains the R scripts used to generate Figures 1 to 4 in the following paper:
 
-Anonymous (2025). Investigating kiwifruit consumer preferences in Japan: Aligning cultivars, origins, and pollen sources. *Q Open*, x(x), x–x. [https://doi.org/xxxxx](https://doi.org/xxxxx)
+Nishimura, T. (2025). Investigating kiwifruit consumer preferences in Japan: Aligning cultivars, origins, and pollen sources. *Q Open*, 5(x), qoaf022. [https://doi.org/10.1093/qopen/qoaf022](https://doi.org/10.1093/qopen/qoaf022)
 
 All figures were created based on statistical data from Japan. Each figure has a corresponding R script that explains how it was generated.
 
